@@ -899,8 +899,9 @@ static void print_usage(void)
 {
 	extern const char *__progname;
 
-	fprintf(stderr, "Usage: %s [-d] [-h]\n", __progname);
+	fprintf(stderr, "Usage: %s [-d] [-i instance]... [-h]\n", __progname);
 	fprintf(stderr, " -d\tPrint detailed debug information\n");
+	fprintf(stderr, " -i\tAlso publish this TFTP instance (e.g. 3 = external MDM mpss)\n");
 	fprintf(stderr, " -h\tPrint this usage info\n");
 }
 
@@ -915,15 +916,24 @@ int main(int argc, char **argv)
 	char buf[4096];
 	fd_set rfds;
 	int nfds;
+	unsigned int extra_inst[8];
+	int n_extra = 0;
 	int opcode;
 	int opt;
+	int i;
 	int ret;
 	int fd;
 
-	while ((opt = getopt(argc, argv, "dh")) != -1) {
+	while ((opt = getopt(argc, argv, "dhi:")) != -1) {
 		switch (opt) {
 		case 'd':
 			tftp_debug = true;
+			/* stdout is a pipe to kmsg: flush per line so RRQs show up */
+			setvbuf(stdout, NULL, _IOLBF, 0);
+			break;
+		case 'i':
+			if (n_extra < 8)
+				extra_inst[n_extra++] = strtoul(optarg, NULL, 0);
 			break;
 		case 'h':
 			print_usage();
@@ -949,6 +959,20 @@ int main(int argc, char **argv)
 	if (ret < 0) {
 		fprintf(stderr, "failed to publish service registry service\n");
 		exit(1);
+	}
+
+	/*
+	 * QTI's tftp_server publishes service 4096 once per remote, with the
+	 * raw instance word selecting the path prefix: 1 = msm/mpss (internal
+	 * modem), 3 = mdm/mpss (external modem, e.g. SDX55), 4 = mdm/adsp, ...
+	 * A fusion modem only looks up its own instance, so it never finds
+	 * instance 1. Word = version | instance << 8, hence (ver = N, inst = 0).
+	 */
+	for (i = 0; i < n_extra; i++) {
+		if (qrtr_publish(fd, 4096, extra_inst[i] & 0xff, extra_inst[i] >> 8) < 0)
+			fprintf(stderr, "failed to publish tftp instance %u\n", extra_inst[i]);
+		else if (tftp_debug)
+			printf("[TQFTP] published instance %u\n", extra_inst[i]);
 	}
 
 	for (;;) {
