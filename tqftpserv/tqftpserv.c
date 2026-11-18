@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <poll.h>
 #include <libqrtr.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -132,6 +133,40 @@ static int sanitize_path(const char *path)
 	return 0;
 }
 
+/*
+ * The SDX55 negotiates large TFTP windows (e.g. 7680 x 10). A burst can
+ * overrun the QRTR socket buffer, and a plain send() then reports ENOBUFS
+ * and drops the block, which makes the modem time out and ERRFATAL. Retry
+ * until the block is accepted.
+ */
+static ssize_t tftp_send_all(int sock, const void *buf, size_t len)
+{
+	size_t done = 0;
+
+	while (done < len) {
+		ssize_t n = send(sock, (const char *)buf + done, len - done,
+				 MSG_DONTWAIT);
+
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK ||
+			    errno == ENOBUFS) {
+				struct pollfd pfd = { .fd = sock, .events = POLLOUT };
+
+				if (poll(&pfd, 1, 1000) < 0 && errno != EINTR)
+					return -1;
+				usleep(1000);
+				continue;
+			}
+			return -1;
+		}
+		done += n;
+	}
+
+	return (ssize_t)done;
+}
+
 static int tftp_send_error(int sock, enum tftp_error code, const char *msg)
 {
 	size_t len;
@@ -148,7 +183,7 @@ static int tftp_send_error(int sock, enum tftp_error code, const char *msg)
 	*(uint16_t *)(buf + 2) = htons(code);
 	strcpy(buf + 4, msg);
 
-	rc = send(sock, buf, len, 0);
+	rc = tftp_send_all(sock, buf, len);
 	free(buf);
 	return rc;
 }
@@ -216,7 +251,7 @@ static ssize_t tftp_send_data(struct tftp_client *client,
 	}
 
 	log_debug("Sending %zd bytes of DATA to %d:%d\n", send_len, client->sq.sq_node, client->sq.sq_port);
-	return send(client->sock, buf, send_len, 0);
+	return tftp_send_all(client->sock, buf, send_len);
 }
 
 
@@ -227,7 +262,7 @@ static int tftp_send_ack(int sock, int block)
 		uint16_t block;
 	} ack = { htons(OP_ACK), htons(block) };
 
-	return send(sock, &ack, sizeof(ack), 0);
+	return tftp_send_all(sock, &ack, sizeof(ack));
 }
 
 static int tftp_send_oack(int sock, size_t *blocksize, size_t *tsize,
@@ -320,7 +355,7 @@ static int tftp_send_oack(int sock, size_t *blocksize, size_t *tsize,
 		*p++ = '\0';
 	}
 
-	return send(sock, buf, p - buf, 0);
+	return tftp_send_all(sock, buf, p - buf);
 }
 
 static int parse_options(const char *buf, size_t len, size_t *blksize,
@@ -869,8 +904,10 @@ static int handle_writer(struct tftp_client *client)
 	memcpy(client->rw_buf + client->blk_offset, buf, payload);
 	client->blk_offset += payload;
 
-	/* Write to file if all the wsize blocks are recieved */
-	if (block % client->wsize == 0) {
+	/* Write to file if all the wsize blocks are received, or if this is the
+	 * final short block: otherwise the last window is never flushed and a
+	 * small write (e.g. mcfg.tmp) lands as an empty file. */
+	if ((block % client->wsize == 0) || (payload < client->blksize)) {
 		ret = write(client->fd, client->rw_buf, client->blk_offset);
 		if (ret < 0) {
 			log_err("failed to write data: %s\n", strerror(errno));
@@ -955,24 +992,40 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	ret = qrtr_publish(fd, 4096, 1, 0);
-	if (ret < 0) {
-		fprintf(stderr, "failed to publish service registry service\n");
-		exit(1);
-	}
-
 	/*
 	 * QTI's tftp_server publishes service 4096 once per remote, with the
 	 * raw instance word selecting the path prefix: 1 = msm/mpss (internal
 	 * modem), 3 = mdm/mpss (external modem, e.g. SDX55), 4 = mdm/adsp, ...
 	 * A fusion modem only looks up its own instance, so it never finds
 	 * instance 1. Word = version | instance << 8, hence (ver = N, inst = 0).
+	 *
+	 * When explicit instances are given, do not also publish instance 1:
+	 * the external SDX55 can resolve it first, use the msm/mpss path
+	 * semantics and drop the SIM / fail its RFS reads.
 	 */
-	for (i = 0; i < n_extra; i++) {
-		if (qrtr_publish(fd, 4096, extra_inst[i] & 0xff, extra_inst[i] >> 8) < 0)
-			fprintf(stderr, "failed to publish tftp instance %u\n", extra_inst[i]);
-		else if (tftp_debug)
-			printf("[TQFTP] published instance %u\n", extra_inst[i]);
+	if (n_extra == 0) {
+		ret = qrtr_publish(fd, 4096, 1, 0);
+		if (ret < 0) {
+			fprintf(stderr, "failed to publish service registry service\n");
+			exit(1);
+		}
+	} else {
+		int published = 0;
+
+		for (i = 0; i < n_extra; i++) {
+			if (qrtr_publish(fd, 4096, extra_inst[i] & 0xff,
+					 extra_inst[i] >> 8) < 0)
+				fprintf(stderr, "failed to publish tftp instance %u\n",
+					extra_inst[i]);
+			else {
+				if (tftp_debug)
+					printf("[TQFTP] published instance %u\n",
+					       extra_inst[i]);
+				published++;
+			}
+		}
+		if (!published)
+			exit(1);
 	}
 
 	for (;;) {
