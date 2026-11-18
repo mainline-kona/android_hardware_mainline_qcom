@@ -212,6 +212,7 @@ static int concat_path(char *base_path, char *firmware_path, char *path, size_t 
 #define FIRMWARE_PARAM_PATH	"/sys/module/firmware_class/parameters/path"
 #else
 #define FIRMWARE_BASE	"/vendor/firmware/"
+#define FIRMWARE_PARAM_PATH	"/sys/module/firmware_class/parameters/path"
 #endif
 
 static DIR *opendir_firmware(char *firmware_path, char *out_path_opened, size_t out_path_size)
@@ -219,8 +220,6 @@ static DIR *opendir_firmware(char *firmware_path, char *out_path_opened, size_t 
 	int ret = 0;
 	DIR *fw_dir = NULL;
 	char fw_sysfs_path[PATH_MAX];
-
-#ifndef ANDROID
 	int n;
 	int fw_param_path = open(FIRMWARE_PARAM_PATH, O_RDONLY);
 
@@ -253,7 +252,6 @@ static DIR *opendir_firmware(char *firmware_path, char *out_path_opened, size_t 
 
 	return fw_dir;
 err:
-#endif
 	ret = concat_path(FIRMWARE_BASE, firmware_path, out_path_opened, out_path_size);
 	if (ret)
 		return fw_dir;

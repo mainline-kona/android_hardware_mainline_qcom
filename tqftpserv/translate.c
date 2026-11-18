@@ -21,6 +21,10 @@
 #define READONLY_PATH	"/readonly/firmware/image/"
 #define READWRITE_PATH	"/readwrite/"
 #define UPDATES_DIR	"updates/"
+#define READONLY_FW_BASE	"/readonly/firmware/"
+#define READONLY_MODEM_PATH	READONLY_FW_BASE "modem_pr"
+#define READONLY_VENDOR_PATH		"/readonly/vendor/firmware/"
+#define READONLY_VENDOR_MNT_PATH	"/readonly/vendor/firmware_mnt/image/"
 
 #ifndef ANDROID
 #define FIRMWARE_BASE	"/lib/firmware/"
@@ -175,6 +179,12 @@ static int translate_readwrite(const char *file, int flags)
 	int ret;
 	int fd;
 
+	if (strstr(file, "..")) {
+		warn("path traversal attempt rejected: %s", file);
+		errno = EACCES;
+		return -1;
+	}
+
 	ret = mkdir(TQFTPSERV_TMP, 0700);
 	if (ret < 0 && errno != EEXIST) {
 		warn("failed to create temporary tqftpserv directory");
@@ -207,8 +217,15 @@ int translate_open(const char *path, int flags)
 {
 	if (!strncmp(path, READONLY_PATH, strlen(READONLY_PATH)))
 		return translate_readonly(path + strlen(READONLY_PATH));
+	else if (!strncmp(path, READONLY_MODEM_PATH, strlen(READONLY_MODEM_PATH)))
+		return translate_readonly(path + strlen(READONLY_FW_BASE));
 	else if (!strncmp(path, READWRITE_PATH, strlen(READWRITE_PATH)))
 		return translate_readwrite(path + strlen(READWRITE_PATH), flags);
+	else if (!strncmp(path, READONLY_VENDOR_MNT_PATH,
+			  strlen(READONLY_VENDOR_MNT_PATH)))
+		return translate_readonly(path + strlen(READONLY_VENDOR_MNT_PATH));
+	else if (!strncmp(path, READONLY_VENDOR_PATH, strlen(READONLY_VENDOR_PATH)))
+		return translate_readonly(path + strlen(READONLY_VENDOR_PATH));
 
 	fprintf(stderr, "invalid path %s, rejecting\n", path);
 	errno = ENOENT;
