@@ -42,6 +42,7 @@ void InvokeDestroyed(gpointer data) {
         context->completed = true;
         context->result.set_value(-EIO);
     }
+    delete context;
 }
 
 }  // namespace
@@ -88,9 +89,9 @@ int32_t GlibWorker::Invoke(const Task& task) {
         return task();
     }
 
-    InvokeContext context;
-    context.task = &task;
-    std::future<int32_t> future = context.result.get_future();
+    auto* context = new InvokeContext();
+    context->task = &task;
+    std::future<int32_t> future = context->result.get_future();
 
     /*
      * Attach the task as an idle source instead of using
@@ -105,7 +106,7 @@ int32_t GlibWorker::Invoke(const Task& task) {
      */
     GSource* source = g_idle_source_new();
     g_source_set_priority(source, G_PRIORITY_DEFAULT);
-    g_source_set_callback(source, InvokeTrampoline, &context, InvokeDestroyed);
+    g_source_set_callback(source, InvokeTrampoline, context, InvokeDestroyed);
     g_source_attach(source, g_main_context_default());
     g_source_unref(source);
 
