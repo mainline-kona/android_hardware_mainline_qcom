@@ -30,6 +30,9 @@
 #define DSP_LIBS		"/dsp/"
 #define SENSORS_CONFIG		"/sensors/config/"
 #define SENSORS_REGISTRY	"/sensors/registry/"
+#define SENSORS_REG_VERSION	"/sensors/registry/../sns_reg_version"
+#define SENSORS_REG_FILE1	"/sensors/registry/../file1"
+#define SENSORS_REG_FILE2	"/sensors/registry/../file2"
 #define SNS_REG_CONFIG		"/sensors/sns_reg.conf"
 #define SYSFS_SOCINFO		"/socinfo/"
 
@@ -112,6 +115,7 @@ static struct hexagonfs_dirent *hfs_map_or_empty(const char *name, const char *p
 struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
 {
 	char *acdbdata, *dsp_libs, *sns_cfg, *sns_reg, *sns_reg_config, *socinfo;
+	char *sns_reg_version, *sns_reg_file1, *sns_reg_file2;
 	size_t n_prefix;
 	struct hexagonfs_dirent *persist_dir, *vendor_dir;
 
@@ -120,6 +124,9 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
 	acdbdata = malloc(n_prefix + strlen(ACDBDATA) + 1);
 	sns_cfg = malloc(n_prefix + strlen(SENSORS_CONFIG) + 1);
 	sns_reg = malloc(n_prefix + strlen(SENSORS_REGISTRY) + 1);
+	sns_reg_version = malloc(n_prefix + strlen(SENSORS_REG_VERSION) + 1);
+	sns_reg_file1 = malloc(n_prefix + strlen(SENSORS_REG_FILE1) + 1);
+	sns_reg_file2 = malloc(n_prefix + strlen(SENSORS_REG_FILE2) + 1);
 	sns_reg_config = malloc(n_prefix + strlen(SNS_REG_CONFIG) + 1);
 	socinfo = malloc(n_prefix + strlen(SYSFS_SOCINFO) + 1);
 
@@ -138,6 +145,21 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
 	if (sns_reg != NULL) {
 		strcpy(sns_reg, prefix);
 		strcat(sns_reg, SENSORS_REGISTRY);
+	}
+
+	if (sns_reg_version != NULL) {
+		strcpy(sns_reg_version, prefix);
+		strcat(sns_reg_version, SENSORS_REG_VERSION);
+	}
+
+	if (sns_reg_file1 != NULL) {
+		strcpy(sns_reg_file1, prefix);
+		strcat(sns_reg_file1, SENSORS_REG_FILE1);
+	}
+
+	if (sns_reg_file2 != NULL) {
+		strcpy(sns_reg_file2, prefix);
+		strcat(sns_reg_file2, SENSORS_REG_FILE2);
 	}
 
 	if (sns_reg_config != NULL) {
@@ -162,8 +184,11 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
 	 */
 	persist_dir = hfs_mkdir("persist", 1,
 				hfs_mkdir("sensors", 1,
-					hfs_mkdir("registry", 1,
-						hfs_map("registry", sns_reg)
+					hfs_mkdir("registry", 4,
+						hfs_map("registry", sns_reg),
+						hfs_map("sns_reg_version", sns_reg_version),
+						hfs_map("file1", sns_reg_file1),
+						hfs_map("file2", sns_reg_file2)
 					)
 				)
 		      );
