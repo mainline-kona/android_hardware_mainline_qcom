@@ -39,15 +39,21 @@ static int open_maybe_compressed(const char *path);
 static void read_fw_path_from_sysfs(char *outbuffer, size_t bufsize)
 {
 	size_t pathsize;
-	FILE *f = fopen("/sys/module/firmware_class/parameters/path", "rt");
+	FILE *f;
+
+	if (!bufsize)
+		return;
+	outbuffer[0] = '\0';
+
+	f = fopen("/sys/module/firmware_class/parameters/path", "rt");
 	if (!f)
 		return;
-	pathsize = fread(outbuffer, sizeof(char), bufsize, f);
+	pathsize = fread(outbuffer, sizeof(char), bufsize - 1, f);
 	fclose(f);
-	if (pathsize == 0)
-		return;
-	/* truncate newline */
-	outbuffer[pathsize - 1] = '\0';
+	outbuffer[pathsize] = '\0';
+	while (pathsize > 0 && (outbuffer[pathsize - 1] == '\n' ||
+				outbuffer[pathsize - 1] == '\r'))
+		outbuffer[--pathsize] = '\0';
 }
 
 /**
