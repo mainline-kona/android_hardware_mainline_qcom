@@ -469,7 +469,17 @@ int main(int argc, char* argv[])
 
 	printf("Starting %s (%s) on %s\n", argv[0], attach_sns? "INIT_ATTACH_SNS": "INIT_ATTACH", fastrpc_node);
 
-	fd = open(fastrpc_node, O_RDWR);
+	/*
+	 * Wait for the DSP remoteproc to boot and ueventd to create/chown the
+	 * FastRPC node instead of exiting immediately into init's 5s restart
+	 * backoff (which causes SLPI to miss apps_std attach and sleep ~60s).
+	 */
+	for (int retries = 0; retries < 300; retries++) {
+		fd = open(fastrpc_node, O_RDWR);
+		if (fd >= 0 || (errno != ENOENT && errno != EACCES))
+			break;
+		usleep(50000);
+	}
 	if (fd < 0) {
 		fprintf(stderr, "Could not open FastRPC node (%s): %s\n", fastrpc_node, strerror(errno));
 		goto err_free_pids;
