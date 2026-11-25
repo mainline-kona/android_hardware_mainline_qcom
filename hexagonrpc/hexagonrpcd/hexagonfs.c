@@ -244,6 +244,41 @@ ssize_t hexagonfs_read(struct hexagonfs_fd **fds, int fileno, size_t size, void 
 	return fd->ops->read(fd, size, ptr);
 }
 
+int hexagonfs_open_phys(struct hexagonfs_fd **fds, const char *path, int flags, mode_t mode)
+{
+	struct hexagonfs_fd *fd;
+	int ret;
+
+	fd = hexagonfs_mapped_open_phys(path, flags, mode);
+	if (fd == NULL)
+		return -errno;
+
+	ret = allocate_file_number(fds, fd);
+	if (ret < 0) {
+		destroy_file_descriptor(fd);
+		return ret;
+	}
+
+	return ret;
+}
+
+ssize_t hexagonfs_write(struct hexagonfs_fd **fds, int fileno, size_t size, const void *ptr)
+{
+	struct hexagonfs_fd *fd;
+
+	if (fileno < 0 || fileno >= HEXAGONFS_MAX_FD)
+		return -EBADF;
+
+	fd = fds[fileno];
+	if (fd == NULL)
+		return -EBADF;
+
+	if (fd->ops->write == NULL)
+		return -ENOSYS;
+
+	return fd->ops->write(fd, size, ptr);
+}
+
 int hexagonfs_readdir(struct hexagonfs_fd **fds, int fileno, size_t ent_size, char *ent)
 {
 	struct hexagonfs_fd *fd;

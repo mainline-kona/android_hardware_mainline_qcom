@@ -142,11 +142,18 @@ static int return_for_next_invoke(int fd,
 				  struct fastrpc_io_buffer **decoded)
 {
 	struct fastrpc_decoder_context *ctx;
-	char inbufs[256];
+	const uint32_t inbufs_cap = 16384;
+	char *inbufs;
 	char *outbufs = NULL;
 	uint32_t inbufs_len;
 	uint32_t outbufs_len;
 	int ret;
+
+	inbufs = malloc(inbufs_cap);
+	if (inbufs == NULL) {
+		perror("Could not allocate input buffer");
+		return -1;
+	}
 
 	outbufs_len = outbufs_calculate_size(REMOTE_SCALARS_OUTBUFS(*sc), returned);
 
@@ -154,6 +161,7 @@ static int return_for_next_invoke(int fd,
 		outbufs = malloc(outbufs_len);
 		if (outbufs == NULL) {
 			perror("Could not allocate encoded output buffer");
+			free(inbufs);
 			return -1;
 		}
 
@@ -164,7 +172,7 @@ static int return_for_next_invoke(int fd,
 				  *rctx, result,
 				  outbufs_len, outbufs,
 				  rctx, handle, sc,
-				  &inbufs_len, 256, inbufs);
+				  &inbufs_len, inbufs_cap, inbufs);
 	if (ret) {
 		if (ret == -1)
 			perror("Could not fetch next FastRPC message");
@@ -174,8 +182,9 @@ static int return_for_next_invoke(int fd,
 		goto err_free_outbufs;
 	}
 
-	if (inbufs_len > 256) {
-		fprintf(stderr, "Large (>256B) input buffers aren't implemented\n");
+	if (inbufs_len > inbufs_cap) {
+		fprintf(stderr, "Large (>%uB) input buffer (%uB) not supported\n",
+			inbufs_cap, inbufs_len);
 		ret = -1;
 		goto err_free_outbufs;
 	}
@@ -203,6 +212,7 @@ static int return_for_next_invoke(int fd,
 
 err_free_outbufs:
 	free(outbufs);
+	free(inbufs);
 	return ret;
 }
 
@@ -231,6 +241,12 @@ static int invoke_requested_procedure(size_t n_ifaces,
 		fprintf(stderr, "Unsupported handle: %u\n", handle);
 		*result = AEE_EUNSUPPORTED;
 		return 1;
+	}
+
+	if (method == 31 && REMOTE_SCALARS_INBUFS(sc) >= 1 && decoded[0].s >= 4) {
+		uint32_t ext_method = *(const uint32_t *)decoded[0].p;
+		if (ext_method >= 31 && ext_method < ifaces[handle]->n_procs)
+			method = ext_method;
 	}
 
 	if (method >= ifaces[handle]->n_procs) {

@@ -138,6 +138,49 @@ static ssize_t mapped_read(struct hexagonfs_fd *fd, size_t size, void *out)
 	return ret;
 }
 
+static ssize_t mapped_write(struct hexagonfs_fd *fd, size_t size, const void *in)
+{
+	struct mapped_ctx *ctx = fd->data;
+	ssize_t ret;
+
+	ret = write(ctx->fd, in, size);
+	if (ret < 0)
+		return -errno;
+
+	return ret;
+}
+
+struct hexagonfs_fd *hexagonfs_mapped_open_phys(const char *path, int flags, mode_t mode)
+{
+	struct hexagonfs_fd *fd;
+	struct mapped_ctx *ctx;
+
+	ctx = malloc(sizeof(struct mapped_ctx));
+	if (ctx == NULL)
+		return NULL;
+
+	fd = malloc(sizeof(struct hexagonfs_fd));
+	if (fd == NULL) {
+		free(ctx);
+		return NULL;
+	}
+
+	ctx->fd = open(path, flags, mode);
+	if (ctx->fd == -1) {
+		free(fd);
+		free(ctx);
+		return NULL;
+	}
+
+	ctx->dir = NULL;
+	fd->is_assigned = false;
+	fd->up = NULL;
+	fd->ops = &hexagonfs_mapped_ops;
+	fd->data = ctx;
+
+	return fd;
+}
+
 static int mapped_readdir(struct hexagonfs_fd *fd, size_t size, char *out)
 {
 	struct mapped_ctx *ctx = fd->data;
@@ -327,6 +370,7 @@ struct hexagonfs_file_ops hexagonfs_mapped_ops = {
 	.from_dirent = mapped_from_dirent,
 	.openat = mapped_openat,
 	.read = mapped_read,
+	.write = mapped_write,
 	.readdir = mapped_readdir,
 	.seek = mapped_seek,
 	.stat = mapped_stat,

@@ -20,8 +20,11 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -150,14 +153,237 @@ static uint32_t apps_std_fseek(void *data,
 	return 0;
 }
 
+/*
+ * Normalize a virtual path and allow write/rename/remove only inside
+ * /mnt/vendor/persist/sensors/registry/ (or /persist/sensors/registry/).
+ */
+static int resolve_persist_registry_path(const char *vpath, char *out, size_t out_sz)
+{
+	static const char persist_prefix[] = "/mnt/vendor/persist/sensors/registry/";
+	static const char short_prefix[] = "/persist/sensors/registry/";
+	const char *segs[64];
+	size_t lens[64];
+	int depth = 0;
+	const char *p = vpath;
+	char norm[PATH_MAX];
+	size_t pos = 0;
+
+	if (!vpath || vpath[0] != '/')
+		return -EINVAL;
+
+	while (*p) {
+		while (*p == '/')
+			p++;
+		if (!*p)
+			break;
+		const char *start = p;
+		while (*p && *p != '/')
+			p++;
+		size_t len = (size_t)(p - start);
+		if (len == 1 && start[0] == '.') {
+			continue;
+		} else if (len == 2 && start[0] == '.' && start[1] == '.') {
+			if (depth > 0)
+				depth--;
+		} else {
+			if (depth >= 64)
+				return -ENAMETOOLONG;
+			segs[depth] = start;
+			lens[depth] = len;
+			depth++;
+		}
+	}
+
+	for (int i = 0; i < depth; i++) {
+		if (pos + 1 + lens[i] >= sizeof(norm))
+			return -ENAMETOOLONG;
+		norm[pos++] = '/';
+		memcpy(norm + pos, segs[i], lens[i]);
+		pos += lens[i];
+	}
+	norm[pos] = '\0';
+
+	if (!strncmp(norm, persist_prefix, sizeof(persist_prefix) - 1)) {
+		if (pos >= out_sz)
+			return -ENAMETOOLONG;
+		memcpy(out, norm, pos + 1);
+		return 0;
+	}
+	if (!strncmp(norm, short_prefix, sizeof(short_prefix) - 1)) {
+		const char *rest = norm + (sizeof(short_prefix) - 1);
+		int n = snprintf(out, out_sz, "%s%s", persist_prefix, rest);
+		if (n < 0 || (size_t)n >= out_sz)
+			return -ENAMETOOLONG;
+		return 0;
+	}
+
+	return -EACCES;
+}
+
+static int mode_to_open_flags(const char *mode, bool *is_write)
+{
+	bool plus = strchr(mode, '+') != NULL;
+
+	if (mode[0] == 'w') {
+		*is_write = true;
+		return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_TRUNC;
+	}
+	if (mode[0] == 'a') {
+		*is_write = true;
+		return (plus ? O_RDWR : O_WRONLY) | O_CREAT | O_APPEND;
+	}
+	if (mode[0] == 'r' && plus) {
+		*is_write = true;
+		return O_RDWR;
+	}
+	*is_write = false;
+	return O_RDONLY;
+}
+
+static uint32_t apps_std_fopen(void *data,
+			       const struct fastrpc_io_buffer *inbufs,
+			       struct fastrpc_io_buffer *outbufs)
+{
+	struct apps_std_ctx *ctx = data;
+	uint32_t *out = outbufs[0].p;
+	const char *name = inbufs[1].p;
+	const char *mode = inbufs[2].p;
+	bool is_write = false;
+	int flags, fd;
+
+	if (name[inbufs[1].s - 1] != 0 || mode[inbufs[2].s - 1] != 0)
+		return AEE_EBADPARM;
+
+	flags = mode_to_open_flags(mode, &is_write);
+	if (is_write) {
+		char phys[PATH_MAX];
+
+		if (resolve_persist_registry_path(name, phys, sizeof(phys)) != 0) {
+			fprintf(stderr, "Tried to open %s for writing\n", name);
+			return AEE_EUNSUPPORTED;
+		}
+		fd = hexagonfs_open_phys(ctx->fds, phys, flags, 0660);
+		if (fd < 0) {
+			fprintf(stderr, "Could not open %s for writing: %s\n",
+				phys, strerror(-fd));
+			return AEE_EFAILED;
+		}
+		*out = fd;
+		return 0;
+	}
+
+	fd = hexagonfs_openat(ctx->fds, ctx->rootfd, ctx->rootfd, name);
+	if (fd < 0) {
+		fprintf(stderr, "Could not open %s: %s\n", name, strerror(-fd));
+		return AEE_EFAILED;
+	}
+
+	*out = fd;
+	return 0;
+}
+
+static uint32_t apps_std_fwrite(void *data,
+				const struct fastrpc_io_buffer *inbufs,
+				struct fastrpc_io_buffer *outbufs)
+{
+	struct apps_std_ctx *ctx = data;
+	const struct {
+		uint32_t fd;
+		uint32_t buf_size;
+	} *first_in = inbufs[0].p;
+	struct {
+		uint32_t written;
+		uint32_t is_eof;
+	} *first_out = outbufs[0].p;
+	ssize_t ret;
+
+	ret = hexagonfs_write(ctx->fds, first_in->fd,
+			      first_in->buf_size, inbufs[1].p);
+	if (ret < 0) {
+		fprintf(stderr, "Could not write file: %s\n", strerror(-ret));
+		return AEE_EFAILED;
+	}
+
+	first_out->written = ret;
+	first_out->is_eof = 0;
+
+	return 0;
+}
+
+static uint32_t apps_std_fsync(void *data,
+			       const struct fastrpc_io_buffer *inbufs,
+			       struct fastrpc_io_buffer *outbufs)
+{
+	(void)data;
+	(void)inbufs;
+	(void)outbufs;
+	return 0;
+}
+
+static uint32_t apps_std_fremove(void *data,
+				 const struct fastrpc_io_buffer *inbufs,
+				 struct fastrpc_io_buffer *outbufs)
+{
+	const char *name = inbufs[1].p;
+	char phys[PATH_MAX];
+
+	(void)data;
+	(void)outbufs;
+
+	if (name[inbufs[1].s - 1] != 0)
+		return AEE_EBADPARM;
+
+	if (resolve_persist_registry_path(name, phys, sizeof(phys)) != 0) {
+		fprintf(stderr, "Refused to remove %s\n", name);
+		return AEE_EUNSUPPORTED;
+	}
+
+	if (unlink(phys) != 0 && errno != ENOENT) {
+		fprintf(stderr, "Could not remove %s: %s\n", phys, strerror(errno));
+		return AEE_EFAILED;
+	}
+
+	return 0;
+}
+
+static uint32_t apps_std_frename(void *data,
+				 const struct fastrpc_io_buffer *inbufs,
+				 struct fastrpc_io_buffer *outbufs)
+{
+	const char *oldname = inbufs[1].p;
+	const char *newname = inbufs[2].p;
+	char old_phys[PATH_MAX], new_phys[PATH_MAX];
+
+	(void)data;
+	(void)outbufs;
+
+	if (oldname[inbufs[1].s - 1] != 0 || newname[inbufs[2].s - 1] != 0)
+		return AEE_EBADPARM;
+
+	if (resolve_persist_registry_path(oldname, old_phys, sizeof(old_phys)) != 0 ||
+	    resolve_persist_registry_path(newname, new_phys, sizeof(new_phys)) != 0) {
+		fprintf(stderr, "Refused to rename %s -> %s\n", oldname, newname);
+		return AEE_EUNSUPPORTED;
+	}
+
+	if (rename(old_phys, new_phys) != 0) {
+		fprintf(stderr, "Could not rename %s -> %s: %s\n",
+			old_phys, new_phys, strerror(errno));
+		return AEE_EFAILED;
+	}
+
+	return 0;
+}
+
 static uint32_t apps_std_fopen_with_env(void *data,
 					const struct fastrpc_io_buffer *inbufs,
 					struct fastrpc_io_buffer *outbufs)
 {
 	struct apps_std_ctx *ctx = data;
 	uint32_t *out = outbufs[0].p;
-	char rw_mode;
-	int dirfd, fd;
+	const char *mode;
+	bool is_write = false;
+	int flags, dirfd, fd;
 
 	// The name and environment variable must also be NULL-terminated
 	if (((const char *) inbufs[1].p)[inbufs[1].s - 1] != 0
@@ -165,11 +391,24 @@ static uint32_t apps_std_fopen_with_env(void *data,
 	 || ((const char *) inbufs[4].p)[inbufs[4].s - 1] != 0)
 		return AEE_EBADPARM;
 
-	rw_mode = ((const char *) inbufs[4].p)[0];
-	if (rw_mode == 'w' || rw_mode == 'a') {
-		fprintf(stderr, "Tried to open %s for writing\n",
-				(const char *) inbufs[3].p);
-		return AEE_EUNSUPPORTED;
+	mode = (const char *) inbufs[4].p;
+	flags = mode_to_open_flags(mode, &is_write);
+	if (is_write) {
+		const char *name = (const char *) inbufs[3].p;
+		char phys[PATH_MAX];
+
+		if (resolve_persist_registry_path(name, phys, sizeof(phys)) != 0) {
+			fprintf(stderr, "Tried to open %s for writing\n", name);
+			return AEE_EUNSUPPORTED;
+		}
+		fd = hexagonfs_open_phys(ctx->fds, phys, flags, 0660);
+		if (fd < 0) {
+			fprintf(stderr, "Could not open %s for writing: %s\n",
+				phys, strerror(-fd));
+			return AEE_EFAILED;
+		}
+		*out = fd;
+		return 0;
 	}
 
 	if (!strcmp(inbufs[1].p, "ADSP_LIBRARY_PATH")) {
@@ -406,7 +645,10 @@ void fastrpc_apps_std_deinit(struct fastrpc_interface *iface)
 }
 
 static const struct fastrpc_function_impl apps_std_procs[] = {
-	{ .def = NULL, .impl = NULL, },
+	{
+		.def = &apps_std_fopen_def,
+		.impl = apps_std_fopen,
+	},
 	{ .def = NULL, .impl = NULL, },
 	{
 		.def = &apps_std_fflush_def,
@@ -420,7 +662,10 @@ static const struct fastrpc_function_impl apps_std_procs[] = {
 		.def = &apps_std_fread_def,
 		.impl = apps_std_fread,
 	},
-	{ .def = NULL, .impl = NULL, },
+	{
+		.def = &apps_std_fwrite_def,
+		.impl = apps_std_fwrite,
+	},
 	{ .def = NULL, .impl = NULL, },
 	{ .def = NULL, .impl = NULL, },
 	{ .def = NULL, .impl = NULL, },
@@ -444,8 +689,14 @@ static const struct fastrpc_function_impl apps_std_procs[] = {
 	{ .def = NULL, .impl = NULL, },
 	{ .def = NULL, .impl = NULL, },
 	{ .def = NULL, .impl = NULL, },
-	{ .def = NULL, .impl = NULL, },
-	{ .def = NULL, .impl = NULL, },
+	{
+		.def = &apps_std_fsync_def,
+		.impl = apps_std_fsync,
+	},
+	{
+		.def = &apps_std_fremove_def,
+		.impl = apps_std_fremove,
+	},
 	{ .def = NULL, .impl = NULL, },
 	{
 		.def = &apps_std_opendir_def,
@@ -465,10 +716,15 @@ static const struct fastrpc_function_impl apps_std_procs[] = {
 		.def = &apps_std_stat_def,
 		.impl = apps_std_stat,
 	},
+	{ .def = NULL, .impl = NULL, },
+	{
+		.def = &apps_std_frename_def,
+		.impl = apps_std_frename,
+	},
 };
 
 const struct fastrpc_interface apps_std_interface = {
 	.name = "apps_std",
-	.n_procs = 32,
+	.n_procs = 34,
 	.procs = apps_std_procs,
 };

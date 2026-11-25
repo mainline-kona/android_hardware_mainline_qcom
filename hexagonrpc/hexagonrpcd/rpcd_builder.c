@@ -182,7 +182,7 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
 	 * Some platforms need this in / and some need it in /mnt/vendor. Form
 	 * a hard link between both locations.
 	 */
-	persist_dir = hfs_mkdir("persist", 1,
+	persist_dir = hfs_mkdir("persist", 2,
 				hfs_mkdir("sensors", 1,
 					hfs_mkdir("registry", 4,
 						hfs_map("registry", sns_reg),
@@ -190,7 +190,8 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
 						hfs_map("file1", sns_reg_file1),
 						hfs_map("file2", sns_reg_file2)
 					)
-				)
+				),
+				hfs_map_or_empty("engineermode", "/mnt/vendor/persist/engineermode")
 		      );
 
 	/*
@@ -207,13 +208,20 @@ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
 				)
 			);
 
-	return hfs_mkdir("/", 6,
+	return hfs_mkdir("/", 7,
 			hfs_mkdir("mnt", 1,
 				hfs_mkdir("vendor", 1,
 					persist_dir
 				)
 			),
 			persist_dir,
+			hfs_mkdir("odm", 1,
+				hfs_mkdir("etc", 1,
+					hfs_mkdir("sensor", 1,
+						hfs_map_or_empty("config", sns_cfg)
+					)
+				)
+			),
 			hfs_mkdir("sys", 1,
 				hfs_mkdir("devices", 1,
 					hfs_map_or_empty("soc0", socinfo)
