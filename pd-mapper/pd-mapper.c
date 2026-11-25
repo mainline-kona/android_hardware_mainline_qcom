@@ -229,18 +229,20 @@ static DIR *opendir_firmware(char *firmware_path, char *out_path_opened, size_t 
 		goto err;
 	}
 
-	n = read(fw_param_path, fw_sysfs_path, sizeof(char) * PATH_MAX);
+	n = read(fw_param_path, fw_sysfs_path, sizeof(fw_sysfs_path) - 1);
 	close(fw_param_path);
-	if (n < 0) {
+	if (n <= 0) {
 		warn("Cannot read sysfs path: %s", FIRMWARE_PARAM_PATH);
 		goto err;
 	}
 
-	/* path not set in sysfs */
-	if (n <= 1)
-		goto err;
+	fw_sysfs_path[n] = '\0';
+	if (fw_sysfs_path[n - 1] == '\n')
+		fw_sysfs_path[n - 1] = '\0';
 
-	fw_sysfs_path[n - 1] = '\0';
+	/* path not set in sysfs */
+	if (fw_sysfs_path[0] == '\0')
+		goto err;
 
 	ret = concat_path(fw_sysfs_path, firmware_path, out_path_opened, out_path_size);
 	if (ret)
